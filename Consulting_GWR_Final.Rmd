@@ -1,0 +1,146 @@
+---
+title: "Orangutan Spatial Pattern"
+author: "Liwen Zhang, Xuechun Liu, Kailun Huang*"
+date: "4/11/2018"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+library(sp)
+library(GWmodel)
+library(maptools)
+library(spdep)
+library(spgwr)
+library(ggplot2)
+library(RColorBrewer)
+```
+
+### Data Input
+```{r message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+OHD1<- rgdal::readOGR("Points_to_use5new.shp")
+```
+
+
+### Introduction
+We get this project from our client, Andrea Blackburn, an anthropology student at Boston
+University. This project studies how spatial parameters (altitude, slope, distance to river, and
+normalized difference vegetation index) predict an orangutan spatial point pattern. The orangutan
+point data was collected with handheld GPS units, and the spatial parameter data was extracted
+from landsat and DEM imagery using geographic information systems (GIS).
+In this project, we use the Kernel Density Value for each point as the dependent variable, and the
+geological information of the data points as independent variables, including Normalized
+Difference Vegetation Index (NDVI), the degree of the slope (0-90 degrees), elevation measured
+in meters, Euclidean distance from point to the river (meters).
+
+
+### Methods
+
+1. Multiple regression model
+
+First, we run a multiple regression model lm(RASTERVALU ~ NDVI_v2 + slope1 + altitude + dist_riv_b) and look at its residual plot to check model assumptions.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+### Linear model
+model1 <- lm(log(RASTERVALU) ~ NDVI_v2 + slope1 + altitude + dist_riv_b, data = OHD1)
+#summary(model1)
+#plot(model1, which=3)
+
+plot(model1$fitted.values, residuals(model1), xlab = "Fitted Values", ylab = "Residuals", main = "Residual Plot")
+abline(a=-0.41, b=0, col = "red")
+abline(a=0.07, b=0, col = "red")
+abline(a=0.47, b=0, col = "red")
+text(7, -0.41, "Q1", col = "red") 
+text(7, 0.07, "Q2", col = "red") 
+text(7, 0.47, "Q3", col = "red") 
+```
+
+The residual plot reveals a funnel shape, which indicates that there is a violation of heteroscedasticity assumptions. We tried to transform the response Y using a concave function (ex. logY, sqrt(Y)), but the shape wasn't improving much. Another option would be to fit a new model by weighted least squares, which geographically weighted regression(GWR) may be a good choice.
+
+Another way to check is to plot the residuals by its quantile to see if there is any obvious spatial patterning. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+resids <- residuals(model1)
+colours <- c("dark blue", "blue", "red", "dark red") 
+#here it is assumed that your eastings and northings coordinates are stored in columns called x and y in your dataframe
+map.resids <- SpatialPointsDataFrame(data=data.frame(resids), coords=cbind(OHD1$Latitude,OHD1$Longitude)) 
+#for speed we are just going to use the quick sp plot function, but you could alternatively store your residuals back in your LondonWards dataframe and plot using geom_point in ggplot2
+spplot(map.resids, cuts=quantile(resids), col.regions=colours, cex=1, 
+       key.space=list(x=1,y=0.9,corner=c(0,1)), 
+       xlab = "Longitude", ylab = "Latitude", main = "Residual Spatial Plot") 
+```
+
+From this plot it is apparent that there is some spatial patterning of the residuals (i.e. the red, dark red and blue points are not randomly distributed, but there appear to be small clusters of red, dark red and blue points in certain parts of the map). As there appears to be some spatial patterning in these residuals, we will now run a geographically weighted regression (GWR) model to see how the coefficients of the model might vary across space.
+
+2. GWR Model
+
+First we will calibrate the bandwidth of the kernel that will be used to capture the points for each regression and then run the GWR model.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+#calculate kernel bandwidth
+GWRbandwidth <- gwr.sel(RASTERVALU ~ NDVI_v2+slope1+altitude+dist_riv_b, data=OHD1, coords=cbind(OHD1$Latitude,OHD1$Longitude),adapt=T) 
+#run the gwr model
+gwr.model <- gwr(RASTERVALU ~ NDVI_v2+slope1+altitude+dist_riv_b, data=OHD1, coords=cbind(OHD1$Latitude,OHD1$Longitude), adapt=GWRbandwidth, hatmatrix=TRUE, se.fit=TRUE) 
+#print the results of the model
+gwr.model
+```
+
+The output from the GWR model reveals how the coefficients vary across the Study region. You will see how the global coefficients are exactly the same as the coefficients in the earlier lm model. In this particular model, if we take altitude, we can see that the coefficients range from a minimum value of -19.43 (1 unit change in altitude resulting in a decrease in kernel density value of 19.43) to +19.54 (1 unit change in altitude resulting in an increase in kernel density value of +19.54). For half of the points in the dataset, as altitude rises by 1 meter, kernel density scores will increase between -1.86 and 1.56 points (the inter-quartile range between the 1st Quartile and the 3rd Quartile).
+
+Coefficient ranges can also be seen for the other variables and they suggest some interesting spatial patterning. To explore this we can plot the GWR coefficients for different variables.
+
+```{r message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+# Plot the various GWR coefficients
+results <- as.data.frame(gwr.model$SDF)
+head(results)
+```
+
+In regards of how to interpret the results, let's take the first point as an example. The model we got for the first point after fitting GWR model is $$RASTERVALU = 880.98 + 858.16*NDVI_v2 - 4.78*slope1 + 1.17*altitude - 4.27*dist_riv_b$$. It means that 1 unit change in Normalized Difference Vegetation Index (NDVI) results in an increase in kernel density value of 858.16, when holding other three variables the same and for 1 unit change in slope results in a decrease in kernel density value of 4.78 Also, for 1 unit change in altitude results in an increase in kernel density value of 1.17, while 1 unite change in Euclidean Distance from point to the river in meters results in a decrase of 4.27.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+#attach coefficients to original dataframe
+OHD1$coefNDVI_v2 <- results$NDVI_v2
+OHD1$coefslope1 <- results$slope1
+OHD1$coefaltitude <- results$altitude
+OHD1$coefdist_riv_b <- results$dist_riv_b
+OHD2 <- as.data.frame(OHD1)
+
+###NDVI_v2
+gwr.point1 <- ggplot(OHD2, aes(x=Longitude,y=Latitude)) +
+  geom_point(aes(colour=OHD2$coefNDVI_v2)) +
+  scale_colour_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0, 
+                         space = "rgb", na.value = "grey50", 
+                         guide = "colourbar", guide_legend(title="Coefs"))+
+  ggtitle("Coefficient of NDVI")
+gwr.point1
+
+###slope1
+gwr.point2 <- ggplot(OHD2, aes(x=Longitude,y=Latitude)) +
+  geom_point(aes(colour=OHD2$coefslope1)) +
+  scale_colour_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0, 
+                         space = "rgb", na.value = "grey50", 
+                         guide = "colourbar", guide_legend(title="Coefs")) +
+  ggtitle("Coefficient of Degree of Slope")
+gwr.point2
+
+###altitude
+gwr.point3 <- ggplot(OHD2, aes(x=Longitude,y=Latitude)) +
+  geom_point(aes(colour=OHD2$coefaltitude)) +
+  scale_colour_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0, 
+                         space = "rgb", na.value = "grey50", 
+                         guide = "colourbar", guide_legend(title="Coefs")) +
+  ggtitle("Coefficient of Elevation")
+gwr.point3
+
+###dist_riv_b
+gwr.point4 <- ggplot(OHD2, aes(x=Longitude,y=Latitude)) +
+  geom_point(aes(colour=OHD2$coefdist_riv_b)) +
+  scale_colour_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0, 
+                         space = "rgb", na.value = "grey50", 
+                         guide = "colourbar", guide_legend(title="Coefs")) +
+  ggtitle("Coefficient of Euclidean Distance to River")
+gwr.point4
+```
+
